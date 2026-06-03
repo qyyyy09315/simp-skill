@@ -31,6 +31,16 @@ VALID_INTERACTION_TYPES = frozenset({
 _DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
+def _needs_leading_newline(path: Path) -> bool:
+    """文件已存在、非空且不以换行结尾（上次写入被截断）时返回 True，
+    据此在追加前补一个前导换行，避免新记录被拼接进损坏的半行后一起丢失。"""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    with path.open("rb") as f:
+        f.seek(-1, 2)
+        return f.read(1) != b"\n"
+
+
 def record_interaction(
     slug: str,
     interaction_type: str,
@@ -86,15 +96,16 @@ def record_interaction(
         "data": computed,
     }
 
+    prefix = "\n" if _needs_leading_newline(interactions_path) else ""
     with interactions_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        f.write(prefix + json.dumps(record, ensure_ascii=False) + "\n")
 
     meta_path = crush_dir / "meta.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         updated_meta = {
             **meta,
-            "interaction_count": meta.get("interaction_count", 0) + 1,
+            "interaction_count": len(get_interactions(slug, base_dir=base_dir)),
             "last_interaction": ts.isoformat(),
             "updated_at": datetime.now().isoformat(),
         }
@@ -114,13 +125,14 @@ def get_interactions(
     cutoff = datetime.now() - timedelta(days=days) if days else None
     results: list[dict[str, Any]] = []
 
-    for line in interactions_path.read_text(encoding="utf-8").splitlines():
+    for idx, line in enumerate(interactions_path.read_text(encoding="utf-8").splitlines(), start=1):
         stripped = line.strip()
         if not stripped:
             continue
         try:
             record = json.loads(stripped)
         except json.JSONDecodeError:
+            logger.warning("⚠️  interactions.jsonl 第 %d 行损坏，已跳过：%.80s", idx, stripped)
             continue
 
         if types and record.get("type") not in types:

@@ -366,3 +366,19 @@ class TestIntegration:
 
         meta = json.loads((crush_dir / "meta.json").read_text(encoding="utf-8"))
         assert meta["interaction_count"] == 15
+
+
+class TestTruncatedLineRecovery:
+    """P2 regression (C4): a crash-truncated last line must not swallow the next record."""
+
+    def test_record_after_truncated_line_keeps_new_record(
+        self, crush_dir: Path, base_dir: Path, slug: str
+    ) -> None:
+        path = crush_dir / "interactions.jsonl"
+        path.write_text('{"ts": "2026-01-01T00:00:00", "type": "chat_se', encoding="utf-8")
+        record_interaction(
+            slug, "chat_sent", {"content_summary": "新消息"},
+            ts=datetime(2026, 5, 20, 10, 0, 0), base_dir=base_dir,
+        )
+        records = get_interactions(slug, base_dir=base_dir)
+        assert any(r["data"].get("content_summary") == "新消息" for r in records)

@@ -291,3 +291,46 @@ def test_rebuild_state_empty_events(crush_dir: Path, base_dir: Path, slug: str) 
     state = rebuild_state_from_events(slug, base_dir)
     assert state["current_stage"] == "未知"
     assert state["signal_score"] is None
+
+
+# ─── P2 regression: frontmatter must not corrupt identifier fields (C5) ────────
+
+
+def test_parse_frontmatter_preserves_leading_zero_slug() -> None:
+    """slug 是档案主键，含前导零时绝不能被强转成 int（007 -> 7 会损坏目录查找）。"""
+    fm, _ = _parse_frontmatter("---\nslug: 007\nnickname: 小美\n---\n\n正文")
+    assert fm["slug"] == "007"
+    assert isinstance(fm["slug"], str)
+
+
+def test_frontmatter_roundtrip_preserves_leading_zero_slug() -> None:
+    """parse -> render -> parse 往返必须保住前导零（update_state 每次都会触发这条往返）。"""
+    fm, body = _parse_frontmatter("---\nslug: 007\n---\n\nbody")
+    fm2, _ = _parse_frontmatter(_render_frontmatter(fm, body))
+    assert fm2["slug"] == "007"
+
+
+# ─── P2 regression: JSONL append must survive a truncated last line (C4) ───────
+
+
+def test_append_event_after_truncated_line_keeps_new_event(
+    crush_dir: Path, base_dir: Path, slug: str
+) -> None:
+    """上次写入崩溃留下半行（无尾换行）时，新事件必须独立可读，而非被拼接进损坏行后一起丢失。"""
+    events_path = crush_dir / "events.jsonl"
+    events_path.write_text('{"ts": "2026-01-01T00:00:00", "type": "signal_rec', encoding="utf-8")
+    append_event(slug, "signal_recorded", {"direction": "green", "content": "新事件"}, base_dir)
+    events = get_recent_events(slug, n=10, base_dir=base_dir)
+    assert any(e["data"].get("content") == "新事件" for e in events)
+
+
+def test_event_count_matches_readable_after_corruption(
+    crush_dir: Path, base_dir: Path, slug: str
+) -> None:
+    """meta.event_count 必须等于实际可读事件数，不能在存在损坏行时盲目自增而漂移。"""
+    events_path = crush_dir / "events.jsonl"
+    events_path.write_text('{"bad json no close', encoding="utf-8")
+    append_event(slug, "signal_recorded", {"direction": "green", "content": "x"}, base_dir)
+    meta = json.loads((crush_dir / "meta.json").read_text(encoding="utf-8"))
+    readable = get_recent_events(slug, n=10_000, base_dir=base_dir)
+    assert meta["event_count"] == len(readable)
