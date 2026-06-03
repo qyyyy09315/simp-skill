@@ -58,6 +58,14 @@ _TIMELINE_LABELS: dict[str, str] = {
 }
 
 
+# Frontmatter 中应解析为数字的键白名单。其余键（尤其作为档案主键的 slug）保持字符串，
+# 避免 "007" 在 parse->render 往返中被静默转成 7 而损坏目录查找。
+_NUMERIC_FRONTMATTER_KEYS = frozenset({
+    "age", "score", "signal_score", "last_signal_score",
+    "milestones_done", "consecutive_days",
+})
+
+
 def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """解析 Markdown YAML frontmatter，返回 (字段dict, 正文)"""
     if not content.startswith("---"):
@@ -72,6 +80,7 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         if ": " not in line:
             continue
         key, _, raw = line.partition(": ")
+        k = key.strip()
         value: Any = raw.strip()
         if (value.startswith('"') and value.endswith('"')) or (
             value.startswith("'") and value.endswith("'")
@@ -79,14 +88,15 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             value = value[1:-1]
         elif value == "null":
             value = None
-        elif value.lstrip("-").isdigit():
-            value = int(value)
-        else:
-            try:
-                value = float(value)
-            except ValueError:
-                pass
-        fields[key.strip()] = value
+        elif k in _NUMERIC_FRONTMATTER_KEYS:
+            if value.lstrip("-").isdigit():
+                value = int(value)
+            else:
+                try:
+                    value = float(value)
+                except ValueError:
+                    pass
+        fields[k] = value
 
     return fields, parts[2]
 
@@ -133,6 +143,16 @@ def _parse_body_sections(body: str) -> dict[str, str]:
     return sections
 
 
+def _needs_leading_newline(path: Path) -> bool:
+    """文件已存在、非空且不以换行结尾（说明上次写入被截断）时返回 True。
+    据此在追加前补一个前导换行，避免把新记录拼接到损坏的半行末尾后一起丢失。"""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    with path.open("rb") as f:
+        f.seek(-1, 2)
+        return f.read(1) != b"\n"
+
+
 def append_event(
     slug: str,
     event_type: str,
@@ -156,15 +176,16 @@ def append_event(
     }
 
     events_path = crush_dir / "events.jsonl"
+    prefix = "\n" if _needs_leading_newline(events_path) else ""
     with events_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        f.write(prefix + json.dumps(event, ensure_ascii=False) + "\n")
 
     meta_path = crush_dir / "meta.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         updated_meta = {
             **meta,
-            "event_count": meta.get("event_count", 0) + 1,
+            "event_count": len(get_recent_events(slug, n=10**9, base_dir=base_dir)),
             "updated_at": datetime.now().isoformat(),
         }
         meta_path.write_text(json.dumps(updated_meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -182,13 +203,14 @@ def get_recent_events(
         return []
 
     events: list[dict[str, Any]] = []
-    for line in events_path.read_text(encoding="utf-8").splitlines():
+    for idx, line in enumerate(events_path.read_text(encoding="utf-8").splitlines(), start=1):
         stripped = line.strip()
         if not stripped:
             continue
         try:
             event = json.loads(stripped)
         except json.JSONDecodeError:
+            logger.warning("⚠️  events.jsonl 第 %d 行损坏，已跳过：%.80s", idx, stripped)
             continue
         if event_types is None or event.get("type") in event_types:
             events.append(event)

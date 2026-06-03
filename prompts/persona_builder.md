@@ -25,7 +25,7 @@ occupation: <职业>
 city: <城市>
 mbti: <MBTI 类型，若已知>
 zodiac: <星座，若已知>
-personality_archetype: <感性型/理性型/混合型>
+personality_type: <感性型/理性型/傲娇型/温柔型>
 ```
 
 ### Layer 2：表达风格

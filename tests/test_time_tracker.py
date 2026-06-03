@@ -143,8 +143,8 @@ class TestGetInteractions:
         assert result[0]["type"] == "meeting"
 
     def test_filters_by_days(self, crush_dir: Path, base_dir: Path, slug: str) -> None:
-        old_ts = datetime(2026, 4, 1, 10, 0, 0)
-        recent_ts = datetime(2026, 5, 18, 10, 0, 0)
+        old_ts = datetime.now() - timedelta(days=30)
+        recent_ts = datetime.now() - timedelta(days=1)
         record_interaction(slug, "chat_sent", {"content_summary": "old"}, ts=old_ts, base_dir=base_dir)
         record_interaction(slug, "chat_sent", {"content_summary": "new"}, ts=recent_ts, base_dir=base_dir)
         result = get_interactions(slug, days=7, base_dir=base_dir)
@@ -218,8 +218,9 @@ class TestAnalyzeTimeline:
 class TestAnalyzeReplyTimes:
     def _seed_replies(self, base_dir: Path, slug: str) -> None:
         delays = [2, 3, 5, 8, 12, 15, 25, 45, 90, 180, 300, 600, 1200]
+        now = datetime.now()
         for i, delay in enumerate(delays):
-            ts = datetime(2026, 5, 18 - i, 20, 0, 0)
+            ts = now - timedelta(days=i)
             record_interaction(
                 slug, "chat_received",
                 {"content_summary": f"reply {i}", "reply_delay_min": delay},
@@ -249,21 +250,22 @@ class TestAnalyzeReplyTimes:
 
 class TestAnalyzeGoldenHours:
     def _seed_hourly(self, base_dir: Path, slug: str) -> None:
+        base = datetime.now() - timedelta(days=2)
         for _ in range(8):
-            ts = datetime(2026, 5, 15, 21, 30, 0)
+            ts = base.replace(hour=21, minute=30, second=0, microsecond=0)
             record_interaction(
                 slug, "chat_received",
                 {"content_summary": "night reply", "reply_delay_min": 5},
                 ts=ts, base_dir=base_dir,
             )
         for _ in range(3):
-            ts = datetime(2026, 5, 15, 12, 0, 0)
+            ts = base.replace(hour=12, minute=0, second=0, microsecond=0)
             record_interaction(
                 slug, "chat_received",
                 {"content_summary": "lunch reply", "reply_delay_min": 10},
                 ts=ts, base_dir=base_dir,
             )
-        ts = datetime(2026, 5, 15, 8, 0, 0)
+        ts = base.replace(hour=8, minute=0, second=0, microsecond=0)
         record_interaction(
             slug, "chat_received",
             {"content_summary": "morning reply", "reply_delay_min": 15},
@@ -364,3 +366,19 @@ class TestIntegration:
 
         meta = json.loads((crush_dir / "meta.json").read_text(encoding="utf-8"))
         assert meta["interaction_count"] == 15
+
+
+class TestTruncatedLineRecovery:
+    """P2 regression (C4): a crash-truncated last line must not swallow the next record."""
+
+    def test_record_after_truncated_line_keeps_new_record(
+        self, crush_dir: Path, base_dir: Path, slug: str
+    ) -> None:
+        path = crush_dir / "interactions.jsonl"
+        path.write_text('{"ts": "2026-01-01T00:00:00", "type": "chat_se', encoding="utf-8")
+        record_interaction(
+            slug, "chat_sent", {"content_summary": "新消息"},
+            ts=datetime(2026, 5, 20, 10, 0, 0), base_dir=base_dir,
+        )
+        records = get_interactions(slug, base_dir=base_dir)
+        assert any(r["data"].get("content_summary") == "新消息" for r in records)
